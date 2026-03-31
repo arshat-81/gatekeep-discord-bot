@@ -1,6 +1,6 @@
 # gatekeep-discord-bot
 
-A Discord bot that locks new members to #welcome for 5 days before granting full server access. Built for 20k+ member servers.
+A Discord bot that locks rejoining members to #welcome for 5 days before granting full server access. Built for 20k+ member servers.
 
 > **Status: 🚧 In Development — Coming Soon**
 
@@ -8,12 +8,39 @@ A Discord bot that locks new members to #welcome for 5 days before granting full
 
 ## 📌 What This Bot Does
 
-- 🔒 Locks all channels for new members except `#welcome` upon joining
-- ⏳ Automatically unlocks full access after a **5-day onboarding window**
-- 📩 DMs the new member with their unlock date and time
-- 🔁 Resets the timer if a member leaves and rejoins
+- 🆕 **First time joining** → Full access immediately, no restrictions
+- 🔒 **Rejoining after leaving** → Locked to `#welcome` only for **5 days**
+- ⏳ Automatically unlocks full access once the 5-day window passes
+- 📩 DMs the member explaining their access status on every join
+- 🔁 Remembers every user who has ever joined — even after they leave
 - ♻️ Recovers active timers automatically if the bot restarts
-- 🧹 Cleans up all data when a member leaves
+- 🧹 Cleans up lockdown data when a member leaves
+
+---
+
+## 🔀 Join Logic
+
+```
+User joins
+  └─> Check if they've been here before
+
+  First time ever
+    └─> Full access, no lock applied
+    └─> DM: "Welcome! You have full access 🎉"
+
+  Rejoining (has been here before)
+    └─> Assign 🔒 Pending role (locked to #welcome only)
+    └─> Start 5-day countdown timer
+    └─> DM: "Welcome back — access unlocked on <date>"
+
+5 Days Pass
+    └─> Remove 🔒 Pending role
+    └─> DM: "You're fully unlocked 🎉"
+
+User Leaves
+    └─> Cancel any active timer
+    └─> Keep their record (so rejoin is detected next time)
+```
 
 ---
 
@@ -23,9 +50,19 @@ A Discord bot that locks new members to #welcome for 5 days before granting full
 |---|---|
 | Node.js | Runtime |
 | discord.js v14 | Discord API wrapper |
-| better-sqlite3 | Persistent timer storage |
+| better-sqlite3 | Persistent storage (timers + member history) |
 | PM2 | Process management & auto-restart |
 | Oracle Cloud Free Tier | 24/7 hosting (free forever) |
+
+---
+
+## 🗄️ Database Structure
+
+Two SQLite tables are used:
+
+**`known_members`** — Every user who has ever joined. Never deleted. Used to detect rejoins.
+
+**`pending_members`** — Users currently in their 5-day lockdown. Cleaned up after unlock or on leave.
 
 ---
 
@@ -33,29 +70,18 @@ A Discord bot that locks new members to #welcome for 5 days before granting full
 
 This bot uses a **role-based locking system** — not per-channel permission overwrites — making it efficient and scalable for large servers.
 
-```
-User Joins
-  └─> Assign 🔒 Pending role  (1 API call)
-  └─> Save to SQLite DB
-  └─> Schedule 5-day unlock timer
-  └─> DM user with unlock date
-
-5 Days Pass
-  └─> Remove 🔒 Pending role  (1 API call)
-  └─> DM user confirming full access
-  └─> Clean up DB entry
-
-User Leaves
-  └─> Cancel timer
-  └─> Remove DB entry
-```
+- On rejoin → assign `🔒 Pending` role **(1 API call)**
+- On unlock → remove `🔒 Pending` role **(1 API call)**
+- The `🔒 Pending` role has `View Channel: deny` set on all channels except `#welcome` — configured once, never touched again
 
 ---
 
 ## 📋 Planned Features
 
 - [ ] Core join/lock/unlock flow
-- [ ] SQLite persistence for timers
+- [ ] First join detection (no restrictions)
+- [ ] Rejoin detection (5-day lockdown)
+- [ ] SQLite persistence for timers and member history
 - [ ] Bot restart recovery
 - [ ] DM notifications on join and unlock
 - [ ] Role-based locking (scalable to 20k+ members)
@@ -101,6 +127,7 @@ gatekeep-discord-bot/
 - Bot role must be positioned **above** the `🔒 Pending` role in server settings
 - The `SERVER MEMBERS INTENT` must be enabled in the Discord Developer Portal
 - Never commit your bot token — use a `.env` file
+- `known_members` records are kept permanently by design — deleting them would cause the bot to treat every rejoin as a first join
 
 ---
 
