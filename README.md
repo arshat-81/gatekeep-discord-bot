@@ -2,139 +2,84 @@
 
 A Discord bot that locks rejoining members to #welcome for 5 days before granting full server access. Built for 20k+ member servers.
 
-> **Status: 🚧 In Development — Coming Soon**
+> **Still being built — but it's coming together nicely.**
 
 ---
 
-## 📌 What This Bot Does
+## So what does this actually do?
 
-- 🆕 **First time joining** → Full access immediately, no restrictions
-- 🔒 **Rejoining after leaving** → Locked to `#welcome` only for **5 days**
-- ⏳ Automatically unlocks full access once the 5-day window passes
-- 📩 DMs the member explaining their access status on every join
-- 🔁 Remembers every user who has ever joined — even after they leave
-- ♻️ Recovers active timers automatically if the bot restarts
-- 🧹 Cleans up lockdown data when a member leaves
+Pretty simple idea honestly. If someone joins your server for the first time, they get in normally — no restrictions, full access, all good. But if they leave and come back? They get locked out of everything except #welcome for 5 days.
 
----
+Why? Because a lot of large servers deal with people leaving and rejoining to dodge bans, cooldowns, or just to cause trouble. This puts a stop to that.
 
-## 🔀 Join Logic
+Here's the short version of how it works:
 
-```
-User joins
-  └─> Check if they've been here before
-
-  First time ever
-    └─> Full access, no lock applied
-    └─> DM: "Welcome! You have full access 🎉"
-
-  Rejoining (has been here before)
-    └─> Assign 🔒 Pending role (locked to #welcome only)
-    └─> Start 5-day countdown timer
-    └─> DM: "Welcome back — access unlocked on <date>"
-
-5 Days Pass
-    └─> Remove 🔒 Pending role
-    └─> DM: "You're fully unlocked 🎉"
-
-User Leaves
-    └─> Cancel any active timer
-    └─> Keep their record (so rejoin is detected next time)
-```
+- Someone joins for the first time → welcome them in, full access, no hassle
+- They leave and rejoin → locked to #welcome only for 5 days, then auto-unlocked
+- Bot sends them a DM both times so they know exactly what's happening
+- If the bot crashes or restarts, it picks up right where it left off — no one gets stuck locked forever
 
 ---
 
-## ⚙️ Tech Stack
+## Why role-based and not channel permissions?
 
-| Technology | Purpose |
-|---|---|
-| Node.js | Runtime |
-| discord.js v14 | Discord API wrapper |
-| better-sqlite3 | Persistent storage (timers + member history) |
-| PM2 | Process management & auto-restart |
-| Oracle Cloud Free Tier | 24/7 hosting (free forever) |
+Honestly the first version of this bot edited permissions on every single channel for every single user. That works fine for a small server but at 20k+ members it absolutely falls apart — Discord has a hard limit of 1000 permission overwrites per channel and the API calls pile up fast.
+
+So instead the bot just assigns a single `🔒 Pending` role on rejoin and removes it after 5 days. Two API calls total per person. The role itself has view access denied on all channels except #welcome — you set that up once and never touch it again.
+
+Much cleaner.
 
 ---
 
-## 🗄️ Database Structure
+## The database side of things
 
-Two SQLite tables are used:
+There are two tables in SQLite:
 
-**`known_members`** — Every user who has ever joined. Never deleted. Used to detect rejoins.
+**known_members** — this stores everyone who has ever joined the server. It never gets deleted. This is how the bot knows whether someone is a first timer or coming back. If you ever clear this table the bot loses its memory and everyone gets treated as new again, so don't touch it.
 
-**`pending_members`** — Users currently in their 5-day lockdown. Cleaned up after unlock or on leave.
-
----
-
-## 🏗️ Architecture
-
-This bot uses a **role-based locking system** — not per-channel permission overwrites — making it efficient and scalable for large servers.
-
-- On rejoin → assign `🔒 Pending` role **(1 API call)**
-- On unlock → remove `🔒 Pending` role **(1 API call)**
-- The `🔒 Pending` role has `View Channel: deny` set on all channels except `#welcome` — configured once, never touched again
+**pending_members** — this is just the active lockdowns. Gets cleaned up once someone unlocks or leaves.
 
 ---
 
-## 📋 Planned Features
+## What's still being worked on
 
-- [ ] Core join/lock/unlock flow
-- [ ] First join detection (no restrictions)
-- [ ] Rejoin detection (5-day lockdown)
-- [ ] SQLite persistence for timers and member history
-- [ ] Bot restart recovery
-- [ ] DM notifications on join and unlock
-- [ ] Role-based locking (scalable to 20k+ members)
-- [ ] PM2 production deployment
-- [ ] Oracle Cloud free hosting setup
-- [ ] Admin command to manually unlock a member
-- [ ] Admin command to check a member's remaining lock time
-- [ ] Configurable time window via config file
-- [ ] Support for multiple guilds
+- [x] Core join and unlock flow
+- [x] First join vs rejoin detection
+- [x] Role-based locking
+- [x] SQLite for persistent timers and member history
+- [x] DM notifications on join and unlock
+- [x] Bot restart recovery
+- [ ] Admin command to manually unlock someone
+- [ ] Admin command to check how long someone has left
+- [ ] Cleaner config file instead of editing bot.js directly
+- [ ] Multi-guild support
 
 ---
 
-## 🚀 Deployment (Coming Soon)
+## Stack
 
-Full setup guide will be added covering:
+Nothing fancy here:
 
-1. Discord Developer Portal setup
-2. Bot token and intent configuration
-3. Creating and configuring the `🔒 Pending` role
-4. Setting channel permissions
-5. Oracle Cloud VM provisioning (free)
-6. Node.js installation
-7. PM2 process management
+- **Node.js** — runtime
+- **discord.js v14** — handles all the Discord stuff
+- **better-sqlite3** — stores timers and member history
+- **PM2** — keeps the bot alive and restarts it if it crashes
+- **Oracle Cloud Free Tier** — runs 24/7 for free, no credit card charges
 
 ---
 
-## 📁 Project Structure (Planned)
+## Deployment guide
 
-```
-gatekeep-discord-bot/
-├── bot.js          # Main bot logic
-├── timers.db       # SQLite database (auto-created)
-├── package.json
-├── .env            # Token and config (never committed)
-├── .gitignore
-└── README.md
-```
+Coming soon. Will cover the full setup from scratch — Discord developer portal, creating the Pending role, setting up the VM on Oracle Cloud, installing everything, and running it with PM2.
 
 ---
 
-## ⚠️ Important Notes
+## A few things worth knowing before you set it up
 
-- Bot role must be positioned **above** the `🔒 Pending` role in server settings
-- The `SERVER MEMBERS INTENT` must be enabled in the Discord Developer Portal
-- Never commit your bot token — use a `.env` file
-- `known_members` records are kept permanently by design — deleting them would cause the bot to treat every rejoin as a first join
+The bot's role in your server needs to be above the `🔒 Pending` role in the role list — otherwise it won't have permission to assign or remove it and nothing will work. Also make sure Server Members Intent is turned on in the Discord developer portal or the join events won't fire at all. And please don't put your bot token in the code and push it to GitHub — use a `.env` file.
 
 ---
 
-## 📄 License
+## License
 
-MIT — free to use and modify.
-
----
-
-> 🔧 **Actively being built.** Check back soon for the first release.
+MIT — do whatever you want with it.
