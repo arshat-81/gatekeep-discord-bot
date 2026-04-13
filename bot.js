@@ -8,7 +8,8 @@ const path = require("path");
 const BOT_TOKEN          = "MTQ4ODYyODMxMDM0MTg0OTIyOA.GA9r9g.u49CwxFxMHW1HFs-Y1R1AxJ6SXB8oYqajowTys";
 const PENDING_ROLE_ID    = "1492817768813297824";
 const WELCOME_CHANNEL_ID = "1492817672868462623";
-const TIME_WINDOW_MS     = 5 * 24 * 60 * 60 * 1000; // 5 days
+const TIME_WINDOW_MS     = 5  * 24 * 60 * 60 * 1000; // 5 days lockdown
+const GRACE_PERIOD_MS    = 15 * 24 * 60 * 60 * 1000; // 15 days — if gone longer, full access
 // ─────────────────────────────────────────
 
 // ── SQLite Setup ───────────────────────────
@@ -18,7 +19,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS known_members (
     user_id    TEXT PRIMARY KEY,
     guild_id   TEXT NOT NULL,
-    first_seen INTEGER NOT NULL
+    first_seen INTEGER NOT NULL,
+    left_at    INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS pending_members (
@@ -28,13 +30,15 @@ db.exec(`
   );
 `);
 
-const isKnownMember = db.prepare(`SELECT 1 FROM known_members WHERE user_id = @userId AND guild_id = @guildId`);
-const markKnown     = db.prepare(`INSERT OR IGNORE INTO known_members (user_id, guild_id, first_seen) VALUES (@userId, @guildId, @firstSeen)`);
-const insertPending = db.prepare(`INSERT OR REPLACE INTO pending_members (user_id, guild_id, joined_at) VALUES (@userId, @guildId, @joinedAt)`);
-const deletePending = db.prepare(`DELETE FROM pending_members WHERE user_id = @userId`);
-const getPending    = db.prepare(`SELECT * FROM pending_members WHERE user_id = @userId`);
-const isPending     = db.prepare(`SELECT 1 FROM pending_members WHERE user_id = @userId`);
-const getAllPending  = db.prepare(`SELECT * FROM pending_members`);
+const getKnownMember = db.prepare(`SELECT * FROM known_members WHERE user_id = @userId AND guild_id = @guildId`);
+const markKnown      = db.prepare(`INSERT OR IGNORE INTO known_members (user_id, guild_id, first_seen) VALUES (@userId, @guildId, @firstSeen)`);
+const updateLeftAt   = db.prepare(`UPDATE known_members SET left_at = @leftAt WHERE user_id = @userId AND guild_id = @guildId`);
+const resetMember    = db.prepare(`UPDATE known_members SET left_at = NULL, first_seen = @firstSeen WHERE user_id = @userId AND guild_id = @guildId`);
+const insertPending  = db.prepare(`INSERT OR REPLACE INTO pending_members (user_id, guild_id, joined_at) VALUES (@userId, @guildId, @joinedAt)`);
+const deletePending  = db.prepare(`DELETE FROM pending_members WHERE user_id = @userId`);
+const getPending     = db.prepare(`SELECT * FROM pending_members WHERE user_id = @userId`);
+const isPending      = db.prepare(`SELECT 1 FROM pending_members WHERE user_id = @userId`);
+const getAllPending   = db.prepare(`SELECT * FROM pending_members`);
 
 // ── Discord Client ─────────────────────────
 const client = new Client({
@@ -155,7 +159,6 @@ async function restoreTimersOnStartup() {
 
 async function registerCommands() {
   const commands = [
-    // /unlock — remove lockdown manually
     new SlashCommandBuilder()
       .setName("unlock")
       .setDescription("Manually unlock a member from their 5-day cooldown")
@@ -164,7 +167,6 @@ async function registerCommands() {
       )
       .toJSON(),
 
-    // /lock — manually lock a member
     new SlashCommandBuilder()
       .setName("lock")
       .setDescription("Manually lock a member for 5 days")
@@ -173,7 +175,6 @@ async function registerCommands() {
       )
       .toJSON(),
 
-    // /status — check remaining lockdown time for a member
     new SlashCommandBuilder()
       .setName("status")
       .setDescription("Check how much lockdown time a member has left")
@@ -182,7 +183,6 @@ async function registerCommands() {
       )
       .toJSON(),
 
-    // /pendinglist — list all currently locked members
     new SlashCommandBuilder()
       .setName("pendinglist")
       .setDescription("List all members currently in lockdown")
@@ -213,46 +213,61 @@ client.on("guildMemberAdd", async (member) => {
   const { id: userId, tag } = member.user;
   const { id: guildId, name: guildName } = member.guild;
 
-  const seenBefore = isKnownMember.get({ userId, guildId });
+  const knownRecord = getKnownMember.get({ userId, guildId });
 
-  if (!seenBefore) {
+  if (!knownRecord) {
+    // ── FIRST TIME EVER ───────────────────────
     console.log(`🆕 First join: ${tag} — full access granted`);
     markKnown.run({ userId, guildId, firstSeen: Date.now() });
 
   } else {
-    console.log(`🔄 Rejoin detected: ${tag} — applying 5-day lockdown`);
+    const goneFor    = knownRecord.left_at ? Date.now() - knownRecord.left_at : 0;
+    const goneTooLong = goneFor > GRACE_PERIOD_MS;
 
-    await applyLock(member);
+    if (goneTooLong) {
+      // ── GONE MORE THAN 15 DAYS — full access ─
+      const daysGone = Math.floor(goneFor / 86400000);
+      console.log(`🔄 ${tag} was gone ${daysGone} days — over grace period, full access granted`);
+      resetMember.run({ firstSeen: Date.now(), userId, guildId });
 
-    const joinedAt   = Date.now();
-    const unlockDate = new Date(joinedAt + TIME_WINDOW_MS).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
-      dateStyle: "full",
-      timeStyle: "short",
-    });
+    } else {
+      // ── REJOINED WITHIN 15 DAYS — lockdown ───
+      const daysGone = Math.floor(goneFor / 86400000);
+      console.log(`🔄 Rejoin detected: ${tag} — gone ${daysGone} day(s) — applying 5-day lockdown`);
 
-    insertPending.run({ userId, guildId, joinedAt });
-    scheduleUnlock(member, TIME_WINDOW_MS);
+      await applyLock(member);
 
-    try {
-      await member.send(
-        `👋 Welcome back to **${guildName}**!\n\n` +
-        `🔒 Since you previously left the server, your access has been restricted for **5 days**.\n\n` +
-        `📌 You can only see the **#welcome** channel for now.\n\n` +
-        `⏰ Full access restores on:\n**${unlockDate}**\n\n` +
-        `Contact an அட்டி member for unlocking`
-      );
-    } catch {
-      console.warn(`Could not DM ${tag}`);
+      const joinedAt   = Date.now();
+      const unlockDate = new Date(joinedAt + TIME_WINDOW_MS).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        dateStyle: "full",
+        timeStyle: "short",
+      });
+
+      insertPending.run({ userId, guildId, joinedAt });
+      scheduleUnlock(member, TIME_WINDOW_MS);
+
+      try {
+        await member.send(
+          `👋 Welcome back to **${guildName}**!\n\n` +
+          `🔒 Since you previously left the server, your access has been restricted for **5 days**.\n\n` +
+          `📌 You can only see the **#welcome** channel for now.\n\n` +
+          `⏰ Full access restores on:\n**${unlockDate}**\n\n` +
+          `Contact an அட்டி member for unlocking.`
+        );
+      } catch {
+        console.warn(`Could not DM ${tag}`);
+      }
     }
   }
 });
 
-// Member leaves
+// Member leaves — save leave timestamp
 client.on("guildMemberRemove", async (member) => {
   console.log(`⬅️  ${member.user.tag} left`);
   cancelTimer(member.id);
   deletePending.run({ userId: member.id });
+  updateLeftAt.run({ leftAt: Date.now(), userId: member.id, guildId: member.guild.id });
 });
 
 // ── Slash Command Handler ──────────────────
@@ -260,7 +275,6 @@ client.on("guildMemberRemove", async (member) => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Admin check for all commands
   if (!interaction.member.permissions.has("Administrator")) {
     return interaction.reply({
       content: "❌ You don't have permission to use this command.",
@@ -322,7 +336,6 @@ client.on("interactionCreate", async (interaction) => {
       timeStyle: "short",
     });
 
-    // Mark as known so future rejoins are also caught
     markKnown.run({ userId: target.id, guildId: interaction.guild.id, firstSeen: joinedAt });
     insertPending.run({ userId: target.id, guildId: interaction.guild.id, joinedAt });
     scheduleUnlock(target, TIME_WINDOW_MS);
@@ -332,7 +345,7 @@ client.on("interactionCreate", async (interaction) => {
         `🔒 Your access in **${interaction.guild.name}** has been manually restricted by a moderator.\n\n` +
         `📌 You can only see the **#welcome** channel for now.\n\n` +
         `⏰ Access restores on:\n**${unlockDate}**\n\n` +
-        `atti அட்டி 👋`
+        `Contact an அட்டி member for unlocking.`
       );
     } catch { /* DMs closed */ }
 
