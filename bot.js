@@ -32,6 +32,7 @@ const isKnownMember = db.prepare(`SELECT 1 FROM known_members WHERE user_id = @u
 const markKnown     = db.prepare(`INSERT OR IGNORE INTO known_members (user_id, guild_id, first_seen) VALUES (@userId, @guildId, @firstSeen)`);
 const insertPending = db.prepare(`INSERT OR REPLACE INTO pending_members (user_id, guild_id, joined_at) VALUES (@userId, @guildId, @joinedAt)`);
 const deletePending = db.prepare(`DELETE FROM pending_members WHERE user_id = @userId`);
+const getPending    = db.prepare(`SELECT * FROM pending_members WHERE user_id = @userId`);
 const isPending     = db.prepare(`SELECT 1 FROM pending_members WHERE user_id = @userId`);
 const getAllPending  = db.prepare(`SELECT * FROM pending_members`);
 
@@ -154,12 +155,37 @@ async function restoreTimersOnStartup() {
 
 async function registerCommands() {
   const commands = [
+    // /unlock — remove lockdown manually
     new SlashCommandBuilder()
       .setName("unlock")
       .setDescription("Manually unlock a member from their 5-day cooldown")
-      .addUserOption((option) =>
-        option.setName("member").setDescription("The member to unlock").setRequired(true)
+      .addUserOption((o) =>
+        o.setName("member").setDescription("The member to unlock").setRequired(true)
       )
+      .toJSON(),
+
+    // /lock — manually lock a member
+    new SlashCommandBuilder()
+      .setName("lock")
+      .setDescription("Manually lock a member for 5 days")
+      .addUserOption((o) =>
+        o.setName("member").setDescription("The member to lock").setRequired(true)
+      )
+      .toJSON(),
+
+    // /status — check remaining lockdown time for a member
+    new SlashCommandBuilder()
+      .setName("status")
+      .setDescription("Check how much lockdown time a member has left")
+      .addUserOption((o) =>
+        o.setName("member").setDescription("The member to check").setRequired(true)
+      )
+      .toJSON(),
+
+    // /pendinglist — list all currently locked members
+    new SlashCommandBuilder()
+      .setName("pendinglist")
+      .setDescription("List all members currently in lockdown")
       .toJSON(),
   ];
 
@@ -190,12 +216,10 @@ client.on("guildMemberAdd", async (member) => {
   const seenBefore = isKnownMember.get({ userId, guildId });
 
   if (!seenBefore) {
-    // ── FIRST TIME — no restrictions ──────────
     console.log(`🆕 First join: ${tag} — full access granted`);
     markKnown.run({ userId, guildId, firstSeen: Date.now() });
 
   } else {
-    // ── REJOIN — add Pending on top of existing roles ──
     console.log(`🔄 Rejoin detected: ${tag} — applying 5-day lockdown`);
 
     await applyLock(member);
@@ -216,7 +240,7 @@ client.on("guildMemberAdd", async (member) => {
         `🔒 Since you previously left the server, your access has been restricted for **5 days**.\n\n` +
         `📌 You can only see the **#welcome** channel for now.\n\n` +
         `⏰ Full access restores on:\n**${unlockDate}**\n\n` +
-        `If you have questions, reach out to a moderator.`
+        `அட்டி 👋`
       );
     } catch {
       console.warn(`Could not DM ${tag}`);
@@ -224,20 +248,19 @@ client.on("guildMemberAdd", async (member) => {
   }
 });
 
-// Member leaves — cancel timer, clean DB, Pending role gone with them naturally
+// Member leaves
 client.on("guildMemberRemove", async (member) => {
   console.log(`⬅️  ${member.user.tag} left`);
   cancelTimer(member.id);
   deletePending.run({ userId: member.id });
-  // known_members kept intentionally — flags them as rejoin next time
 });
 
-// Slash command handler
+// ── Slash Command Handler ──────────────────
+
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "unlock") return;
 
-  // Admins only
+  // Admin check for all commands
   if (!interaction.member.permissions.has("Administrator")) {
     return interaction.reply({
       content: "❌ You don't have permission to use this command.",
@@ -245,39 +268,133 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  // Defer immediately — prevents interaction timeout
   await interaction.deferReply({ flags: 64 });
 
-  const target = interaction.options.getMember("member");
+  const { commandName } = interaction;
 
-  if (!target) {
-    return interaction.editReply({ content: "❌ Member not found." });
-  }
+  // ── /unlock ──────────────────────────────
+  if (commandName === "unlock") {
+    const target = interaction.options.getMember("member");
+    if (!target) return interaction.editReply({ content: "❌ Member not found." });
 
-  const locked = isPending.get({ userId: target.id });
+    const locked = isPending.get({ userId: target.id });
+    if (!locked) {
+      return interaction.editReply({
+        content: `⚠️ **${target.user.tag}** is not currently in a lockdown.`,
+      });
+    }
 
-  if (!locked) {
+    cancelTimer(target.id);
+    deletePending.run({ userId: target.id });
+    await removeLock(target);
+
+    try {
+      await target.send(
+        `✅ Your access in **${interaction.guild.name}** has been manually unlocked by a moderator.\n\n` +
+        `You now have full access to all channels.`
+      );
+    } catch { /* DMs closed */ }
+
+    console.log(`🔓 ${target.user.tag} manually unlocked by ${interaction.user.tag}`);
     return interaction.editReply({
-      content: `⚠️ **${target.user.tag}** is not currently in a lockdown.`,
+      content: `✅ **${target.user.tag}** has been unlocked and can now access all channels.`,
     });
   }
 
-  cancelTimer(target.id);
-  deletePending.run({ userId: target.id });
-  await removeLock(target);
+  // ── /lock ────────────────────────────────
+  if (commandName === "lock") {
+    const target = interaction.options.getMember("member");
+    if (!target) return interaction.editReply({ content: "❌ Member not found." });
 
-  try {
-    await target.send(
-      `✅ Your access in **${interaction.guild.name}** has been manually unlocked by a moderator.\n\n` +
-      `You now have full access to all channels.`
+    const alreadyLocked = isPending.get({ userId: target.id });
+    if (alreadyLocked) {
+      return interaction.editReply({
+        content: `⚠️ **${target.user.tag}** is already in a lockdown.`,
+      });
+    }
+
+    await applyLock(target);
+
+    const joinedAt   = Date.now();
+    const unlockDate = new Date(joinedAt + TIME_WINDOW_MS).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      dateStyle: "full",
+      timeStyle: "short",
+    });
+
+    // Mark as known so future rejoins are also caught
+    markKnown.run({ userId: target.id, guildId: interaction.guild.id, firstSeen: joinedAt });
+    insertPending.run({ userId: target.id, guildId: interaction.guild.id, joinedAt });
+    scheduleUnlock(target, TIME_WINDOW_MS);
+
+    try {
+      await target.send(
+        `🔒 Your access in **${interaction.guild.name}** has been manually restricted by a moderator.\n\n` +
+        `📌 You can only see the **#welcome** channel for now.\n\n` +
+        `⏰ Access restores on:\n**${unlockDate}**\n\n` +
+        `atti அட்டி 👋`
+      );
+    } catch { /* DMs closed */ }
+
+    console.log(`🔒 ${target.user.tag} manually locked by ${interaction.user.tag}`);
+    return interaction.editReply({
+      content: `🔒 **${target.user.tag}** has been locked for 5 days.`,
+    });
+  }
+
+  // ── /status ──────────────────────────────
+  if (commandName === "status") {
+    const target = interaction.options.getMember("member");
+    if (!target) return interaction.editReply({ content: "❌ Member not found." });
+
+    const row = getPending.get({ userId: target.id });
+    if (!row) {
+      return interaction.editReply({
+        content: `✅ **${target.user.tag}** is not in any lockdown.`,
+      });
+    }
+
+    const elapsed    = Date.now() - row.joined_at;
+    const remaining  = TIME_WINDOW_MS - elapsed;
+    const unlockDate = new Date(row.joined_at + TIME_WINDOW_MS).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      dateStyle: "full",
+      timeStyle: "short",
+    });
+
+    return interaction.editReply({
+      content:
+        `🔒 **${target.user.tag}** is currently locked.\n\n` +
+        `⏳ Time remaining: **${formatTimeRemaining(remaining)}**\n` +
+        `📅 Unlocks on: **${unlockDate}**`,
+    });
+  }
+
+  // ── /pendinglist ──────────────────────────
+  if (commandName === "pendinglist") {
+    const rows = getAllPending.all();
+    const now  = Date.now();
+
+    if (rows.length === 0) {
+      return interaction.editReply({ content: "✅ No members are currently in lockdown." });
+    }
+
+    const lines = await Promise.all(
+      rows.map(async (row) => {
+        const remaining = TIME_WINDOW_MS - (now - row.joined_at);
+        try {
+          const member = await interaction.guild.members.fetch(row.user_id);
+          return `• **${member.user.tag}** — ${formatTimeRemaining(remaining)} left`;
+        } catch {
+          return `• Unknown user (${row.user_id}) — ${formatTimeRemaining(remaining)} left`;
+        }
+      })
     );
-  } catch { /* DMs closed */ }
 
-  console.log(`🔓 ${target.user.tag} manually unlocked by ${interaction.user.tag}`);
-
-  return interaction.editReply({
-    content: `✅ **${target.user.tag}** has been unlocked and can now access all channels.`,
-  });
+    return interaction.editReply({
+      content: `🔒 **Members currently in lockdown (${rows.length}):**\n\n${lines.join("\n")}`,
+    });
+  }
 });
 
 client.login(BOT_TOKEN);
