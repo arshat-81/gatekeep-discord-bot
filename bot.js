@@ -240,7 +240,7 @@ client.on("guildMemberAdd", async (member) => {
         `🔒 Since you previously left the server, your access has been restricted for **5 days**.\n\n` +
         `📌 You can only see the **#welcome** channel for now.\n\n` +
         `⏰ Full access restores on:\n**${unlockDate}**\n\n` +
-        `அட்டி 👋`
+        `Contact an அட்டி member for unlocking`
       );
     } catch {
       console.warn(`Could not DM ${tag}`);
