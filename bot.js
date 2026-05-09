@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const {
   Client,
   GatewayIntentBits,
@@ -10,17 +12,40 @@ const Database = require("better-sqlite3");
 const path = require("path");
 
 // ─────────────────────────────────────────
-//  CONFIG — fill these in before running
+//  CONFIG
 // ─────────────────────────────────────────
-const BOT_TOKEN          = "MTQ4ODYyODMxMDM0MTg0OTIyOA.GA9r9g.u49CwxFxMHW1HFs-Y1R1AxJ6SXB8oYqajowTys";
-const PENDING_ROLE_ID    = "1492817768813297824";
-const WELCOME_CHANNEL_ID = "1492817672868462623";
-const TIME_WINDOW_MS     = 5  * 24 * 60 * 60 * 1000; // 5 days lockdown
-const GRACE_PERIOD_MS    = 15 * 24 * 60 * 60 * 1000; // 15 days — if gone longer, full access
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function readEnvNumber(name, fallback) {
+  const rawValue = process.env[name];
+  if (rawValue === undefined || rawValue === "") return fallback;
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a positive number.`);
+  }
+
+  return value;
+}
+
+function readDurationMs(msName, daysName, defaultDays) {
+  if (process.env[msName] !== undefined && process.env[msName] !== "") {
+    return readEnvNumber(msName, defaultDays * MS_PER_DAY);
+  }
+
+  return readEnvNumber(daysName, defaultDays) * MS_PER_DAY;
+}
+
+const BOT_TOKEN          = process.env.BOT_TOKEN;
+const PENDING_ROLE_ID    = process.env.PENDING_ROLE_ID;
+const WELCOME_CHANNEL_ID = process.env.WELCOME_CHANNEL_ID;
+const TIME_WINDOW_MS     = readDurationMs("TIME_WINDOW_MS", "TIME_WINDOW_DAYS", 5); // default: 5 days lockdown
+const GRACE_PERIOD_MS    = readDurationMs("GRACE_PERIOD_MS", "GRACE_PERIOD_DAYS", 15); // default: 15 days before full access
+const DB_PATH            = process.env.DB_PATH || path.join(__dirname, "timers.db");
 // ─────────────────────────────────────────
 
 // ── SQLite Setup ───────────────────────────
-const db = new Database(path.join(__dirname, "timers.db"));
+const db = new Database(DB_PATH);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS known_members (
