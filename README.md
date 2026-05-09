@@ -49,9 +49,11 @@ There are two tables in SQLite:
 - [x] SQLite for persistent timers and member history
 - [x] DM notifications on join and unlock
 - [x] Bot restart recovery
-- [ ] Admin command to manually unlock someone
-- [ ] Admin command to check how long someone has left
-- [ ] Cleaner config file instead of editing bot.js directly
+- [x] Admin command to manually unlock someone
+- [x] Admin command to manually lock someone
+- [x] Admin command to check how long someone has left
+- [x] Admin command to list everyone currently locked
+- [x] Environment-based config for local and Railway deploys
 - [ ] Multi-guild support
 
 ---
@@ -63,20 +65,107 @@ Nothing fancy here:
 - **Node.js** — runtime
 - **discord.js v14** — handles all the Discord stuff
 - **better-sqlite3** — stores timers and member history
-- **PM2** — keeps the bot alive and restarts it if it crashes
-- **Oracle Cloud Free Tier** — runs 24/7 for free, no credit card charges
+- **dotenv** — loads local `.env` config
+- **Railway** — deployment target with environment variables and persistent volume support
 
 ---
 
-## Deployment guide
+## Local setup
 
-Coming soon. Will cover the full setup from scratch — Discord developer portal, creating the Pending role, setting up the VM on Oracle Cloud, installing everything, and running it with PM2.
+Install dependencies:
+
+```bash
+npm install
+```
+
+Create your local `.env` file:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in your real values:
+
+```env
+BOT_TOKEN=your_bot_token_here
+PENDING_ROLE_ID=1492817768813297824
+WELCOME_CHANNEL_ID=1492817672868462623
+TIME_WINDOW_DAYS=5
+GRACE_PERIOD_DAYS=15
+```
+
+Then start the bot:
+
+```bash
+npm start
+```
+
+Do not commit `.env`. It is ignored by Git because it contains your real bot token.
+
+---
+
+## Environment variables
+
+| Variable | Required | What it does |
+| --- | --- | --- |
+| `BOT_TOKEN` | Yes | Discord bot token from the Discord Developer Portal |
+| `PENDING_ROLE_ID` | Yes | Role ID for the restricted Pending role |
+| `WELCOME_CHANNEL_ID` | Yes | Welcome channel ID used by the bot config |
+| `TIME_WINDOW_DAYS` | No | Lockdown duration in days. Defaults to `5` |
+| `GRACE_PERIOD_DAYS` | No | How long someone can be gone before they get full access again. Defaults to `15` |
+| `TIME_WINDOW_MS` | No | Advanced override for lockdown duration in milliseconds |
+| `GRACE_PERIOD_MS` | No | Advanced override for grace period in milliseconds |
+| `DB_PATH` | No | SQLite database path. Defaults to `./timers.db` locally |
+
+If both day and millisecond values are set, the millisecond value wins.
+
+---
+
+## Railway deployment
+
+Railway does not need a `.env` file. Add the same values in your Railway service under **Variables**:
+
+```env
+BOT_TOKEN=your_bot_token_here
+PENDING_ROLE_ID=1492817768813297824
+WELCOME_CHANNEL_ID=1492817672868462623
+TIME_WINDOW_DAYS=5
+GRACE_PERIOD_DAYS=15
+DB_PATH=/data/timers.db
+```
+
+For SQLite persistence on Railway, add a volume and mount it at:
+
+```text
+/data
+```
+
+That keeps `timers.db` alive across restarts and redeploys. Without the volume, Railway can wipe the database when the service restarts.
+
+Railway can start the bot using:
+
+```bash
+npm start
+```
+
+---
+
+## Slash commands
+
+All commands are admin-only:
+
+- `/lock` — manually lock a member for the configured lockdown time
+- `/unlock` — manually unlock a member
+- `/status` — check how much lockdown time a member has left
+- `/pendinglist` — list all members currently in lockdown
 
 ---
 
 ## A few things worth knowing before you set it up
 
-The bot's role in your server needs to be above the `🔒 Pending` role in the role list — otherwise it won't have permission to assign or remove it and nothing will work. Also make sure Server Members Intent is turned on in the Discord developer portal or the join events won't fire at all. And please don't put your bot token in the code and push it to GitHub — use a `.env` file.
+The bot's role in your server needs to be above the `🔒 Pending` role in the role list — otherwise it won't have permission to assign or remove it and nothing will work. Also make sure Server Members Intent is turned on in the Discord developer portal or the join events won't fire at all.
+
+If your bot token ever gets pasted in public or pushed to GitHub, reset it immediately in the Discord Developer Portal and update `.env` locally plus Railway Variables in production.
 
 ---
 
