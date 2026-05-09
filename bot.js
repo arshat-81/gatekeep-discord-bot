@@ -1,4 +1,11 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  PermissionFlagsBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+} = require("discord.js");
 const Database = require("better-sqlite3");
 const path = require("path");
 
@@ -53,6 +60,13 @@ const unlockTimers = new Map();
 
 // ── Helpers ────────────────────────────────
 
+function adminOnlyCommand(command) {
+  return command
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false)
+    .toJSON();
+}
+
 function formatTimeRemaining(ms) {
   const days    = Math.floor(ms / (1000 * 60 * 60 * 24));
   const hours   = Math.floor((ms % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
@@ -67,14 +81,20 @@ function cancelTimer(userId) {
   }
 }
 
+function memberHasAdminPermission(member) {
+  return Boolean(member.permissions?.has(PermissionFlagsBits.Administrator));
+}
+
 // ── Lock / Unlock ──────────────────────────
 
 async function applyLock(member) {
   try {
     await member.roles.add(PENDING_ROLE_ID);
     console.log(`🔒 Locked: ${member.user.tag}`);
+    return true;
   } catch (err) {
     console.error(`Failed to lock ${member.user.tag}: ${err.message}`);
+    return false;
   }
 }
 
@@ -82,8 +102,10 @@ async function removeLock(member) {
   try {
     await member.roles.remove(PENDING_ROLE_ID);
     console.log(`🔓 Unlocked: ${member.user.tag}`);
+    return true;
   } catch (err) {
     console.error(`Failed to unlock ${member.user.tag}: ${err.message}`);
+    return false;
   }
 }
 
@@ -159,46 +181,53 @@ async function restoreTimersOnStartup() {
 
 async function registerCommands() {
   const commands = [
-    new SlashCommandBuilder()
+    adminOnlyCommand(new SlashCommandBuilder()
       .setName("unlock")
       .setDescription("Manually unlock a member from their 5-day cooldown")
       .addUserOption((o) =>
         o.setName("member").setDescription("The member to unlock").setRequired(true)
-      )
-      .toJSON(),
+      )),
 
-    new SlashCommandBuilder()
+    adminOnlyCommand(new SlashCommandBuilder()
       .setName("lock")
       .setDescription("Manually lock a member for 5 days")
       .addUserOption((o) =>
         o.setName("member").setDescription("The member to lock").setRequired(true)
-      )
-      .toJSON(),
+      )),
 
-    new SlashCommandBuilder()
+    adminOnlyCommand(new SlashCommandBuilder()
       .setName("status")
       .setDescription("Check how much lockdown time a member has left")
       .addUserOption((o) =>
         o.setName("member").setDescription("The member to check").setRequired(true)
-      )
-      .toJSON(),
+      )),
 
-    new SlashCommandBuilder()
+    adminOnlyCommand(new SlashCommandBuilder()
       .setName("pendinglist")
-      .setDescription("List all members currently in lockdown")
-      .toJSON(),
+      .setDescription("List all members currently in lockdown")),
   ];
 
   const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
   try {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("✅ Slash commands registered");
+    await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
+
+    await Promise.all(
+      client.guilds.cache.map((guild) =>
+        rest.put(Routes.applicationGuildCommands(client.user.id, guild.id), { body: commands })
+      )
+    );
+
+    console.log("✅ Slash commands registered as admin-only guild commands");
   } catch (err) {
     console.error("Failed to register slash commands:", err.message);
   }
 }
 
 // ── Events ─────────────────────────────────
+
+client.on("error", (err) => {
+  console.error("Discord client error:", err);
+});
 
 client.once("clientReady", async () => {
   console.log(`\n✅ Logged in as ${client.user.tag}`);
@@ -235,7 +264,14 @@ client.on("guildMemberAdd", async (member) => {
       const daysGone = Math.floor(goneFor / 86400000);
       console.log(`🔄 Rejoin detected: ${tag} — gone ${daysGone} day(s) — applying 5-day lockdown`);
 
-      await applyLock(member);
+      if (memberHasAdminPermission(member)) {
+        console.warn(`⚠️  Skipping lockdown for ${tag}: Administrator bypasses channel restrictions`);
+        resetMember.run({ firstSeen: Date.now(), userId, guildId });
+        return;
+      }
+
+      const locked = await applyLock(member);
+      if (!locked) return;
 
       const joinedAt   = Date.now();
       const unlockDate = new Date(joinedAt + TIME_WINDOW_MS).toLocaleString("en-IN", {
@@ -272,19 +308,83 @@ client.on("guildMemberRemove", async (member) => {
 
 // ── Slash Command Handler ──────────────────
 
+function isUnknownInteractionError(err) {
+  return err?.code === 10062 || err?.rawError?.code === 10062;
+}
+
+function hasAdminPermission(interaction) {
+  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
+}
+
+async function safeInitialReply(interaction, options) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(options);
+    } else {
+      await interaction.reply(options);
+    }
+    return true;
+  } catch (err) {
+    if (isUnknownInteractionError(err)) {
+      console.warn(`Ignored expired /${interaction.commandName} interaction from ${interaction.user.tag}`);
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function safeDeferReply(interaction) {
+  try {
+    await interaction.deferReply({ flags: 64 });
+    return true;
+  } catch (err) {
+    if (isUnknownInteractionError(err)) {
+      console.warn(`Ignored expired /${interaction.commandName} interaction from ${interaction.user.tag}`);
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function handleInteractionError(interaction, err) {
+  if (isUnknownInteractionError(err)) {
+    console.warn(`Ignored expired /${interaction.commandName} interaction from ${interaction.user.tag}`);
+    return;
+  }
+
+  console.error(`Slash command /${interaction.commandName} failed:`, err);
+
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content: "❌ Command failed. Check bot logs." });
+    } else {
+      await interaction.reply({
+        content: "❌ Command failed. Check bot logs.",
+        flags: 64,
+      });
+    }
+  } catch (replyErr) {
+    if (isUnknownInteractionError(replyErr)) return;
+    console.error(`Failed to send error reply for /${interaction.commandName}:`, replyErr);
+  }
+}
+
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (!interaction.member.permissions.has("Administrator")) {
-    return interaction.reply({
-      content: "❌ You don't have permission to use this command.",
-      flags: 64,
-    });
-  }
+  try {
+    if (!interaction.inGuild() || !hasAdminPermission(interaction)) {
+      await safeInitialReply(interaction, {
+        content: "❌ You don't have permission to use this command.",
+        flags: 64,
+      });
+      return;
+    }
 
-  await interaction.deferReply({ flags: 64 });
+    const deferred = await safeDeferReply(interaction);
+    if (!deferred) return;
 
-  const { commandName } = interaction;
+    const { commandName } = interaction;
 
   // ── /unlock ──────────────────────────────
   if (commandName === "unlock") {
@@ -298,9 +398,15 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
+    const unlocked = await removeLock(target);
+    if (!unlocked) {
+      return interaction.editReply({
+        content: "❌ I couldn't remove the lockdown role. Check my Manage Roles permission and role position.",
+      });
+    }
+
     cancelTimer(target.id);
     deletePending.run({ userId: target.id });
-    await removeLock(target);
 
     try {
       await target.send(
@@ -320,6 +426,12 @@ client.on("interactionCreate", async (interaction) => {
     const target = interaction.options.getMember("member");
     if (!target) return interaction.editReply({ content: "❌ Member not found." });
 
+    if (memberHasAdminPermission(target)) {
+      return interaction.editReply({
+        content: "❌ I can't lock an administrator. Discord's Administrator permission bypasses channel restrictions.",
+      });
+    }
+
     const alreadyLocked = isPending.get({ userId: target.id });
     if (alreadyLocked) {
       return interaction.editReply({
@@ -327,7 +439,12 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    await applyLock(target);
+    const locked = await applyLock(target);
+    if (!locked) {
+      return interaction.editReply({
+        content: "❌ I couldn't add the lockdown role. Check my Manage Roles permission and role position.",
+      });
+    }
 
     const joinedAt   = Date.now();
     const unlockDate = new Date(joinedAt + TIME_WINDOW_MS).toLocaleString("en-IN", {
@@ -407,6 +524,9 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.editReply({
       content: `🔒 **Members currently in lockdown (${rows.length}):**\n\n${lines.join("\n")}`,
     });
+  }
+  } catch (err) {
+    await handleInteractionError(interaction, err);
   }
 });
 
